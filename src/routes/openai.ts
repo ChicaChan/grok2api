@@ -30,6 +30,13 @@ function openAiError(message: string, code: string): Record<string, unknown> {
   return { error: { message, type: "invalid_request_error", code } };
 }
 
+function jsonErrorResponse(body: Record<string, unknown>, status: number): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
+
 function getClientIp(req: Request): string {
   return (
     req.headers.get("CF-Connecting-IP") ||
@@ -111,6 +118,66 @@ function isContentModerationMessage(message: string): boolean {
     m.includes("content-moderated") ||
     m.includes("wke=grok:content-moderated")
   );
+}
+
+function compactUpstreamText(input: string, maxLen = 200): string {
+  return String(input || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLen);
+}
+
+function looksLikeHtmlDocument(input: string): boolean {
+  const sample = compactUpstreamText(input, 400).toLowerCase();
+  return (
+    sample.startsWith("<!doctype html") ||
+    sample.startsWith("<html") ||
+    sample.includes("<html") ||
+    sample.includes("<body") ||
+    sample.includes("<title")
+  );
+}
+
+function isCloudflareChallengeResponse(status: number, input: string): boolean {
+  if (status !== 403) return false;
+  const sample = compactUpstreamText(input, 600).toLowerCase();
+  return (
+    looksLikeHtmlDocument(input) &&
+    (
+      sample.includes("cloudflare") ||
+      sample.includes("attention required") ||
+      sample.includes("cf-chl") ||
+      sample.includes("challenge-platform") ||
+      sample.includes("captcha")
+    )
+  );
+}
+
+function summarizeUpstreamFailure(
+  status: number,
+  input: string,
+  context: "chat" | "image" | "video" = "chat",
+): string {
+  if (isCloudflareChallengeResponse(status, input)) {
+    if (context === "image") {
+      return "Upstream 403: Cloudflare challenge encountered. Configure a valid cf_clearance in Grok settings or switch image_generation_method to imagine_ws_experimental and retry.";
+    }
+    return "Upstream 403: Cloudflare challenge encountered. Configure a valid cf_clearance in Grok settings and retry.";
+  }
+  const snippet = compactUpstreamText(input);
+  return snippet ? `Upstream ${status}: ${snippet}` : `Upstream ${status}`;
+}
+
+function classifyUpstreamFailureCode(status: number, input: string): string {
+  if (isCloudflareChallengeResponse(status, input)) return "cloudflare_challenge";
+  if (status === 403) return "upstream_forbidden";
+  if (status === 429) return "rate_limit_exceeded";
+  return "upstream_error";
+}
+
+function isCloudflareChallengeMessage(message: string): boolean {
+  const normalized = String(message || "").toLowerCase();
+  return normalized.includes("cloudflare challenge") && normalized.includes("cf_clearance");
 }
 
 async function enforceQuota(args: {
@@ -577,7 +644,7 @@ async function runImageCall(args: {
   });
   if (!upstream.ok) {
     const txt = await upstream.text().catch(() => "");
-    throw new Error(`Upstream ${upstream.status}: ${txt.slice(0, 200)}`);
+    throw new Error(summarizeUpstreamFailure(upstream.status, txt, "image"));
   }
   const rawUrls = await collectImageUrls(upstream);
   const converted = await Promise.all(
@@ -1223,6 +1290,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
     const stream = Boolean(body.stream);
     const maxRetry = 3;
     let lastErr: string | null = null;
+    let lastErrCode = "upstream_error";
+    let lastErrStatus = 500;
 
     // === Quota check (best-effort) ===
     // - heavy: consumes both heavy + chat
@@ -1290,7 +1359,10 @@ openAiRoutes.post("/chat/completions", async (c) => {
 
         if (!upstream.ok) {
           const txt = await upstream.text().catch(() => "");
-          lastErr = `Upstream ${upstream.status}: ${txt.slice(0, 200)}`;
+          const context = cfg.is_image_model ? "image" : cfg.is_video_model ? "video" : "chat";
+          lastErr = summarizeUpstreamFailure(upstream.status, txt, context);
+          lastErrCode = classifyUpstreamFailureCode(upstream.status, txt);
+          lastErrStatus = lastErrCode === "cloudflare_challenge" ? 502 : 500;
           await recordTokenFailure(c.env.DB, jwt, upstream.status, txt.slice(0, 200));
           await applyCooldown(c.env.DB, jwt, upstream.status);
           if (retryCodes.includes(upstream.status) && attempt < maxRetry - 1) continue;
@@ -1352,6 +1424,10 @@ openAiRoutes.post("/chat/completions", async (c) => {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         lastErr = msg;
+        if (isCloudflareChallengeMessage(msg)) {
+          lastErrCode = "cloudflare_challenge";
+          lastErrStatus = 502;
+        }
         await recordTokenFailure(c.env.DB, jwt, 500, msg);
         await applyCooldown(c.env.DB, jwt, 500);
         if (attempt < maxRetry - 1) continue;
@@ -1369,7 +1445,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
       error: lastErr ?? "unknown_error",
     });
 
-    return c.json(openAiError(lastErr ?? "Upstream error", "upstream_error"), 500);
+    return jsonErrorResponse(openAiError(lastErr ?? "Upstream error", lastErrCode), lastErrStatus);
   } catch (e) {
     const duration = (Date.now() - start) / 1000;
     await addRequestLog(c.env.DB, {
@@ -1514,6 +1590,7 @@ openAiRoutes.post("/images/generations", async (c) => {
       });
       if (!upstream.ok) {
         const txt = await upstream.text().catch(() => "");
+        const summarized = summarizeUpstreamFailure(upstream.status, txt, "image");
         await recordTokenFailure(c.env.DB, chosen.token, upstream.status, txt.slice(0, 200));
         await applyCooldown(c.env.DB, chosen.token, upstream.status);
         await recordImageLog({
@@ -1530,7 +1607,7 @@ openAiRoutes.post("/images/generations", async (c) => {
           createStreamErrorImageEventStream({
             message: isContentModerationMessage(txt)
               ? txt.slice(0, 500)
-              : `Upstream ${upstream.status}`,
+              : summarized,
             responseField,
           }),
           { status: 200, headers: streamHeaders() },
@@ -1648,6 +1725,18 @@ openAiRoutes.post("/images/generations", async (c) => {
         error: message,
       });
       return c.json(openAiError(message, "content_policy_violation"), 400);
+    }
+    if (isCloudflareChallengeMessage(message)) {
+      await recordImageLog({
+        env: c.env,
+        ip,
+        model: requestedModel || "image",
+        start,
+        keyName,
+        status: 502,
+        error: message,
+      });
+      return jsonErrorResponse(openAiError(message, "cloudflare_challenge"), 502);
     }
     await recordImageLog({
       env: c.env,
@@ -1815,6 +1904,7 @@ openAiRoutes.post("/images/edits", async (c) => {
       });
       if (!upstream.ok) {
         const txt = await upstream.text().catch(() => "");
+        const summarized = summarizeUpstreamFailure(upstream.status, txt, "image");
         await recordTokenFailure(c.env.DB, chosen.token, upstream.status, txt.slice(0, 200));
         await applyCooldown(c.env.DB, chosen.token, upstream.status);
         await recordImageLog({
@@ -1831,7 +1921,7 @@ openAiRoutes.post("/images/edits", async (c) => {
           createStreamErrorImageEventStream({
             message: isContentModerationMessage(txt)
               ? txt.slice(0, 500)
-              : `Upstream ${upstream.status}`,
+              : summarized,
             responseField,
           }),
           { status: 200, headers: streamHeaders() },
@@ -1936,6 +2026,18 @@ openAiRoutes.post("/images/edits", async (c) => {
         error: message,
       });
       return c.json(openAiError(message, "content_policy_violation"), 400);
+    }
+    if (isCloudflareChallengeMessage(message)) {
+      await recordImageLog({
+        env: c.env,
+        ip,
+        model: requestedModel || "image",
+        start,
+        keyName,
+        status: 502,
+        error: message,
+      });
+      return jsonErrorResponse(openAiError(message, "cloudflare_challenge"), 502);
     }
     await recordImageLog({
       env: c.env,
