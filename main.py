@@ -1,7 +1,7 @@
-"""
-Grok2API 应用入口
+﻿"""
+Grok2API 搴旂敤鍏ュ彛
 
-FastAPI 应用初始化和路由注册
+FastAPI 搴旂敤鍒濆鍖栧拰璺敱娉ㄥ唽
 """
 
 from contextlib import asynccontextmanager
@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Depends
 
 from app.core.auth import verify_api_key
-from app.core.config import get_config
+from app.core.config import config, get_config
 from app.core.logger import logger, setup_logging
 from app.core.exceptions import register_exception_handlers
 from app.core.response_middleware import ResponseLoggerMiddleware
@@ -34,7 +34,7 @@ from app.api.v1.uploads import router as uploads_router
 from app.services.token import get_scheduler
 
 
-# 初始化日志
+# 鍒濆鍖栨棩蹇?
 setup_logging(
     level=os.getenv("LOG_LEVEL", "INFO"),
     json_console=False,
@@ -44,17 +44,15 @@ setup_logging(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理"""
+    """搴旂敤鐢熷懡鍛ㄦ湡绠＄悊"""
 
-    # 0. 兼容迁移：保留旧版 data 目录中的配置/缓存等数据
+    # 0. 鍏煎杩佺Щ锛氫繚鐣欐棫鐗?data 鐩綍涓殑閰嶇疆/缂撳瓨绛夋暟鎹?
     from app.core.legacy_migration import migrate_legacy_cache_dirs, migrate_legacy_account_settings
 
     await asyncio.to_thread(migrate_legacy_cache_dirs)
 
-    # 1. 加载配置（内部会自动合并 defaults + 兼容 setting.toml）
-    from app.core.config import config
-
-    await config.load()
+    # 1. 鍔犺浇閰嶇疆锛堝唴閮ㄤ細鑷姩鍚堝苟 defaults + 鍏煎 setting.toml锛?
+    await config.ensure_loaded()
 
     # 1.1 Old account post-migration settings (TOS + BirthDate + NSFW), best-effort
     async def _run_legacy_account_migration():
@@ -65,22 +63,24 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(_run_legacy_account_migration())
 
-    # 2. 启动服务显示
+    # 2. 鍚姩鏈嶅姟鏄剧ず
     logger.info("Starting Grok2API...")
     logger.info(f"Platform: {platform.system()} {platform.release()}")
     logger.info(f"Python: {sys.version.split()[0]}")
 
-    # 3. 启动 Token 刷新调度器
+    # 3. 鍚姩 Token 鍒锋柊璋冨害鍣?
     refresh_enabled = get_config("token.auto_refresh", True)
     if refresh_enabled:
-        interval = get_config("token.refresh_interval_hours", 8)
+        basic_interval = get_config("token.refresh_interval_hours", 8)
+        super_interval = get_config("token.super_refresh_interval_hours", 2)
+        interval = min(basic_interval, super_interval)
         scheduler = get_scheduler(interval)
         scheduler.start()
 
     logger.info("Application startup complete.")
     yield
 
-    # 关闭
+    # 鍏抽棴
     logger.info("Shutting down Grok2API...")
 
     # Best-effort: stop auto-register to avoid blocking shutdown on background threads.
@@ -102,7 +102,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    """创建 FastAPI 应用"""
+    """鍒涘缓 FastAPI 搴旂敤"""
     app = FastAPI(
         title="Grok2API",
         lifespan=lifespan,
@@ -112,7 +112,7 @@ def create_app() -> FastAPI:
     async def health():
         return {"status": "healthy", "service": "Grok2API", "runtime": "python-fastapi"}
 
-    # CORS 配置
+    # CORS 閰嶇疆
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -121,20 +121,25 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    # 请求日志和 ID 中间件
+    # 璇锋眰鏃ュ織鍜?ID 涓棿浠?
     app.add_middleware(ResponseLoggerMiddleware)
 
-    # 注册异常处理器
+    @app.middleware("http")
+    async def ensure_config_loaded(request: Request, call_next):
+        await config.ensure_loaded()
+        return await call_next(request)
+
+    # 娉ㄥ唽寮傚父澶勭悊鍣?
     register_exception_handlers(app)
 
-    # 注册路由
+    # 娉ㄥ唽璺敱
     app.include_router(chat_router, prefix="/v1", dependencies=[Depends(verify_api_key)])
     app.include_router(image_router, prefix="/v1", dependencies=[Depends(verify_api_key)])
     app.include_router(models_router, prefix="/v1", dependencies=[Depends(verify_api_key)])
     app.include_router(uploads_router, prefix="/v1", dependencies=[Depends(verify_api_key)])
     app.include_router(files_router, prefix="/v1/files")
 
-    # 静态文件服务
+    # 闈欐€佹枃浠舵湇鍔?
     #
     # NOTE: Starlette/StaticFiles serves JS as `application/javascript` without a charset.
     # Some browsers/OS locales may then mis-decode UTF-8 and display `????` for Chinese text.
@@ -177,7 +182,7 @@ def create_app() -> FastAPI:
 
         app.mount("/static", _UTF8StaticFiles(directory=static_dir), name="static")
 
-    # 注册管理路由
+    # 娉ㄥ唽绠＄悊璺敱
     from app.api.v1.admin import router as admin_router
 
     app.include_router(admin_router)
@@ -195,10 +200,10 @@ if __name__ == "__main__":
     port = int(os.getenv("SERVER_PORT", "8000"))
     workers = int(os.getenv("SERVER_WORKERS", "1"))
 
-    # 平台检查
+    # 骞冲彴妫€鏌?
     is_windows = platform.system() == "Windows"
 
-    # 自动降级
+    # 鑷姩闄嶇骇
     if is_windows and workers > 1:
         logger.warning(
             f"Windows platform detected. Multiple workers ({workers}) is not supported. "
@@ -213,3 +218,4 @@ if __name__ == "__main__":
         workers=workers,
         log_level=os.getenv("LOG_LEVEL", "INFO").lower(),
     )
+

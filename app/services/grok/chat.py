@@ -50,7 +50,10 @@ class MessageExtractor:
     VIDEO_UNSUPPORTED = {"input_audio", "file"}
     
     @staticmethod
-    def extract(messages: List[Dict[str, Any]], is_video: bool = False) -> tuple[str, List[str]]:
+    def extract(
+        messages: List[Dict[str, Any]],
+        is_video: bool = False,
+    ) -> tuple[str, List[tuple[str, str]]]:
         """
         从 OpenAI 消息格式提取内容
         
@@ -76,13 +79,19 @@ class MessageExtractor:
             parts = []
 
             # 简单字符串内容
+            if content is None:
+                continue
             if isinstance(content, str):
                 if content.strip():
                     parts.append(content)
+            elif isinstance(content, dict):
+                content = [content]
 
             # 列表格式内容
-            elif isinstance(content, list):
+            if isinstance(content, list):
                 for item in content:
+                    if not isinstance(item, dict):
+                        continue
                     item_type = item.get("type", "")
 
                     # 文本类型

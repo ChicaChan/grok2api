@@ -1,6 +1,8 @@
 """Token 服务模块"""
 
 from app.services.token.models import (
+    BASIC__DEFAULT_QUOTA,
+    SUPER_DEFAULT_QUOTA,
     TokenInfo,
     TokenStatus,
     TokenPoolStats,
@@ -19,6 +21,8 @@ __all__ = [
     "TokenStatus", 
     "TokenPoolStats", 
     "EffortType", 
+    "BASIC__DEFAULT_QUOTA",
+    "SUPER_DEFAULT_QUOTA",
     "DEFAULT_QUOTA",
     "EFFORT_COST",
     

@@ -5,6 +5,7 @@
 - config.defaults.toml: 默认配置基线
 """
 
+import asyncio
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict
@@ -226,6 +227,8 @@ class Config:
         self._config = {}
         self._defaults = {}
         self._defaults_loaded = False
+        self._loaded = False
+        self._load_lock = asyncio.Lock()
 
     def _ensure_defaults(self):
         if self._defaults_loaded:
@@ -283,9 +286,20 @@ class Config:
                     )
 
             self._config = merged
+            self._loaded = True
         except Exception as e:
             logger.error(f"Error loading config: {e}")
             self._config = {}
+            self._loaded = False
+
+    async def ensure_loaded(self):
+        """确保配置至少成功加载一次。"""
+        if self._loaded:
+            return
+        async with self._load_lock:
+            if self._loaded:
+                return
+            await self.load()
 
     def get(self, key: str, default: Any = None) -> Any:
         """
@@ -315,6 +329,7 @@ class Config:
             merged = _deep_merge(base, new_config or {})
             await storage.save_config(merged)
             self._config = merged
+            self._loaded = True
 
 
 # 全局配置实例

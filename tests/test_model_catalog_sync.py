@@ -16,6 +16,7 @@ def test_model_catalog_contains_latest_models():
         "grok-4.1-expert",
         "grok-4.1-thinking",
         "grok-4.20-beta",
+        "grok-imagine-1.0-fast",
         "grok-imagine-1.0",
         "grok-imagine-1.0-edit",
         "grok-imagine-1.0-video",
@@ -25,7 +26,7 @@ def test_model_catalog_contains_latest_models():
 
 def test_removed_models_are_not_exposed():
     model_ids = {m.model_id for m in ModelService.list()}
-    removed = {"grok-3-fast", "grok-4-fast", "grok-4.1"}
+    removed = {"grok-3-fast", "grok-4-fast", "grok-4.1", "grok-superimage-1.0"}
     assert model_ids.isdisjoint(removed)
 
 
