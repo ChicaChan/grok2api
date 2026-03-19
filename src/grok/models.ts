@@ -145,6 +145,18 @@ export const MODEL_CONFIG: Record<string, ModelInfo> = {
     supported_max_output_tokens: 131072,
     default_top_p: 0.95,
   },
+  "grok-imagine-1.0-fast": {
+    grok_model: ["grok-3", "MODEL_MODE_FAST"],
+    rate_limit_model: "grok-3",
+    display_name: "Grok Imagine 1.0 Fast",
+    description: "Imagine waterfall image generation model for chat completions",
+    raw_model_path: "xai/grok-imagine-1.0-fast",
+    default_temperature: 1.0,
+    default_max_output_tokens: 8192,
+    supported_max_output_tokens: 131072,
+    default_top_p: 0.95,
+    is_image_model: true,
+  },
   "grok-imagine-1.0": {
     grok_model: ["grok-3", "MODEL_MODE_FAST"],
     rate_limit_model: "grok-3",
